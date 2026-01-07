@@ -1,25 +1,24 @@
-"""Secrets management commands."""
+"""Database views management commands."""
 
 import click
 from rich.console import Console
-
 from wowsql_cli.utils.formatters import format_output
 
 console = Console()
 
 
 @click.group()
-def secrets_group():
-    """Secrets management commands."""
+def views_group():
+    """Database views management commands."""
     pass
 
 
-@secrets_group.command('list')
+@views_group.command('list')
 @click.option('--project', help='Project slug (overrides default)')
 @click.option('--format', type=click.Choice(['table', 'json', 'yaml']))
 @click.pass_context
-def list_secrets(ctx, project, format):
-    """List all secrets."""
+def list_views(ctx, project, format):
+    """List all database views."""
     try:
         api = ctx.obj['api']
         config = ctx.obj['config']
@@ -29,22 +28,22 @@ def list_secrets(ctx, project, format):
             console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
             raise click.Abort()
         
-        secrets = api.list_secrets(project_slug)
+        views = api.list_views(project_slug)
         output_format = format or ctx.obj['output']
-        format_output(secrets, output_format, console)
+        format_output(views, output_format, console)
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise click.Abort()
 
 
-@secrets_group.command('set')
-@click.argument('key')
-@click.argument('value')
-@click.option('--public', is_flag=True, help='Mark secret as public (can be exposed to client)')
+@views_group.command('create')
+@click.argument('view_name')
+@click.argument('sql', required=False)
+@click.option('--file', type=click.Path(exists=True), help='SQL file with view definition')
 @click.option('--project', help='Project slug (overrides default)')
 @click.pass_context
-def set_secret(ctx, key, value, project, public):
-    """Set a secret value."""
+def create_view(ctx, view_name, sql, file, project):
+    """Create a database view."""
     try:
         api = ctx.obj['api']
         config = ctx.obj['config']
@@ -54,19 +53,29 @@ def set_secret(ctx, key, value, project, public):
             console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
             raise click.Abort()
         
-        api.set_secret(project_slug, key, value, is_public=public)
-        console.print(f"[green]✓[/green] Secret '{key}' set")
+        if file:
+            with open(file, 'r') as f:
+                view_sql = f.read()
+        elif sql:
+            view_sql = sql
+        else:
+            console.print("[red]Error:[/red] SQL definition or --file required")
+            raise click.Abort()
+        
+        api.create_view(project_slug, view_name, view_sql)
+        console.print(f"[green]✓[/green] View '{view_name}' created")
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise click.Abort()
 
 
-@secrets_group.command('get')
-@click.argument('key')
+@views_group.command('describe')
+@click.argument('view_name')
 @click.option('--project', help='Project slug (overrides default)')
+@click.option('--format', type=click.Choice(['table', 'json', 'yaml']))
 @click.pass_context
-def get_secret(ctx, key, project):
-    """Get a secret value."""
+def describe_view(ctx, view_name, project, format):
+    """Describe view structure."""
     try:
         api = ctx.obj['api']
         config = ctx.obj['config']
@@ -76,30 +85,9 @@ def get_secret(ctx, key, project):
             console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
             raise click.Abort()
         
-        value = api.get_secret(project_slug, key)
-        console.print(value)
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise click.Abort()
-
-
-@secrets_group.command('unset')
-@click.argument('key')
-@click.option('--project', help='Project slug (overrides default)')
-@click.pass_context
-def unset_secret(ctx, key, project):
-    """Delete a secret."""
-    try:
-        api = ctx.obj['api']
-        config = ctx.obj['config']
-        project_slug = project or config.get_default_project()
-        
-        if not project_slug:
-            console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
-            raise click.Abort()
-        
-        api.delete_secret(project_slug, key)
-        console.print(f"[green]✓[/green] Secret '{key}' deleted")
+        view_info = api.describe_view(project_slug, view_name)
+        output_format = format or ctx.obj['output']
+        format_output(view_info, output_format, console)
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise click.Abort()

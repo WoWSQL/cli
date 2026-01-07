@@ -277,3 +277,332 @@ def import_data(ctx, table, file, project):
         console.print(f"[red]Error:[/red] {e}")
         raise click.Abort()
 
+
+@db_group.command('dump')
+@click.option('--output', type=click.Path(), help='Output file path (default: dump.sql)')
+@click.option('--schema-only', is_flag=True, help='Export schema only (no data)')
+@click.option('--data-only', is_flag=True, help='Export data only (no schema)')
+@click.option('--tables', help='Comma-separated list of tables to export')
+@click.option('--project', help='Project slug (overrides default)')
+@click.pass_context
+def dump_database(ctx, output, schema_only, data_only, tables, project):
+    """Export entire database to SQL file."""
+    try:
+        api = ctx.obj['api']
+        config = ctx.obj['config']
+        project_slug = project or config.get_default_project()
+        
+        if not project_slug:
+            console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
+            raise click.Abort()
+        
+        output_path = Path(output) if output else Path('dump.sql')
+        
+        console.print(f"[cyan]Exporting database...[/cyan]")
+        dump_data = api.dump_database(
+            project_slug,
+            schema_only=schema_only,
+            data_only=data_only,
+            tables=tables.split(',') if tables else None
+        )
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(dump_data.get('sql', ''))
+        
+        console.print(f"[green]✓[/green] Database exported to: {output_path}")
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise click.Abort()
+
+
+@db_group.command('restore')
+@click.option('--file', type=click.Path(exists=True), required=True, help='SQL file to restore')
+@click.option('--project', help='Project slug (overrides default)')
+@click.option('--confirm', is_flag=True, help='Skip confirmation')
+@click.pass_context
+def restore_database(ctx, file, project, confirm):
+    """Restore database from SQL file."""
+    try:
+        api = ctx.obj['api']
+        config = ctx.obj['config']
+        project_slug = project or config.get_default_project()
+        
+        if not project_slug:
+            console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
+            raise click.Abort()
+        
+        if not confirm:
+            if not click.confirm(f"Restore database from '{file}'? This will overwrite existing data."):
+                console.print("[yellow]Cancelled[/yellow]")
+                return
+        
+        file_path = Path(file)
+        with open(file_path, 'r', encoding='utf-8') as f:
+            sql_content = f.read()
+        
+        console.print(f"[cyan]Restoring database...[/cyan]")
+        result = api.restore_database(project_slug, sql_content)
+        
+        console.print(f"[green]✓[/green] Database restored successfully")
+        if result.get('tables_created'):
+            console.print(f"  Tables created: {result.get('tables_created')}")
+        if result.get('rows_inserted'):
+            console.print(f"  Rows inserted: {result.get('rows_inserted')}")
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise click.Abort()
+
+
+@db_group.command('seed')
+@click.option('--file', type=click.Path(exists=True), help='SQL or JSON file with seed data')
+@click.option('--project', help='Project slug (overrides default)')
+@click.pass_context
+def seed_database(ctx, file, project):
+    """Seed database with initial data."""
+    try:
+        api = ctx.obj['api']
+        config = ctx.obj['config']
+        project_slug = project or config.get_default_project()
+        
+        if not project_slug:
+            console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
+            raise click.Abort()
+        
+        if file:
+            file_path = Path(file)
+            if file_path.suffix == '.sql':
+                # SQL seed file
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    sql_content = f.read()
+                result = api.query(project_slug, sql_content)
+                console.print(f"[green]✓[/green] Database seeded from SQL file")
+            else:
+                # JSON seed file
+                with open(file_path, 'r') as f:
+                    seed_data = json.load(f)
+                
+                count = 0
+                for table, rows in seed_data.items():
+                    for row in rows:
+                        api.insert_data(project_slug, table, row)
+                        count += 1
+                
+                console.print(f"[green]✓[/green] Seeded {count} rows from JSON file")
+        else:
+            # Look for seed.sql in current directory
+            seed_file = Path('seed.sql')
+            if seed_file.exists():
+                with open(seed_file, 'r', encoding='utf-8') as f:
+                    sql_content = f.read()
+                result = api.query(project_slug, sql_content)
+                console.print(f"[green]✓[/green] Database seeded from seed.sql")
+            else:
+                console.print("[yellow]No seed file found. Use --file to specify a seed file.[/yellow]")
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise click.Abort()
+
+
+@db_group.command('diff')
+@click.option('--project', help='Project slug (overrides default)')
+@click.option('--format', type=click.Choice(['table', 'json', 'yaml']))
+@click.pass_context
+def diff_schema(ctx, project, format):
+    """Compare local and remote database schemas."""
+    try:
+        api = ctx.obj['api']
+        config = ctx.obj['config']
+        project_slug = project or config.get_default_project()
+        
+        if not project_slug:
+            console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
+            raise click.Abort()
+        
+        # Get remote schema
+        remote_schema = api.get_schema(project_slug)
+        
+        # Get local schema from migrations
+        migrations_dir = Path('migrations')
+        local_schema = {}
+        if migrations_dir.exists():
+            # In a real implementation, we'd parse migrations to build schema
+            console.print("[yellow]Local schema parsing from migrations not yet fully implemented[/yellow]")
+        
+        # Compare schemas
+        diff_result = api.compare_schemas(project_slug, local_schema, remote_schema)
+        
+        output_format = format or ctx.obj['output']
+        if output_format == 'table':
+            _display_schema_diff(diff_result)
+        else:
+            format_output(diff_result, output_format, console)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise click.Abort()
+
+
+def _display_schema_diff(diff_result: dict):
+    """Display schema differences in a table."""
+    from rich.table import Table
+    
+    table = Table(title="Schema Differences")
+    table.add_column("Type", style="cyan")
+    table.add_column("Name", style="white")
+    table.add_column("Status", style="yellow")
+    table.add_column("Details", style="gray")
+    
+    differences = diff_result.get('differences', [])
+    for diff in differences:
+        table.add_row(
+            diff.get('type', ''),
+            diff.get('name', ''),
+            diff.get('status', ''),
+            diff.get('details', '')
+        )
+    
+    console.print(table)
+    
+    if not differences:
+        console.print("\n[green]✓[/green] No schema differences found")
+
+
+@db_group.group('schema')
+def schema_group():
+    """Schema management commands."""
+    pass
+
+
+@schema_group.command('dump')
+@click.option('--output', type=click.Path(), help='Output file path (default: schema.sql)')
+@click.option('--project', help='Project slug (overrides default)')
+@click.pass_context
+def dump_schema(ctx, output, project):
+    """Export database schema only (no data)."""
+    try:
+        api = ctx.obj['api']
+        config = ctx.obj['config']
+        project_slug = project or config.get_default_project()
+        
+        if not project_slug:
+            console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
+            raise click.Abort()
+        
+        output_path = Path(output) if output else Path('schema.sql')
+        
+        console.print(f"[cyan]Exporting schema...[/cyan]")
+        dump_data = api.dump_database(project_slug, schema_only=True)
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(dump_data.get('sql', ''))
+        
+        console.print(f"[green]✓[/green] Schema exported to: {output_path}")
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise click.Abort()
+
+
+@schema_group.command('diff')
+@click.option('--project', help='Project slug (overrides default)')
+@click.option('--format', type=click.Choice(['table', 'json', 'yaml']))
+@click.pass_context
+def schema_diff(ctx, project, format):
+    """Show schema differences."""
+    ctx.forward(diff_schema)
+
+
+@db_group.command('connect')
+@click.option('--project', help='Project slug (overrides default)')
+@click.pass_context
+def connect_database(ctx, project):
+    """Connect to database interactively."""
+    try:
+        api = ctx.obj['api']
+        config = ctx.obj['config']
+        project_slug = project or config.get_default_project()
+        
+        if not project_slug:
+            console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
+            raise click.Abort()
+        
+        # Get database connection info
+        connection_info = api.get_database_connection(project_slug)
+        
+        console.print(f"[cyan]Database Connection Info:[/cyan]")
+        console.print(f"  Host: {connection_info.get('host')}")
+        console.print(f"  Port: {connection_info.get('port')}")
+        console.print(f"  Database: {connection_info.get('database')}")
+        console.print(f"  User: {connection_info.get('user')}")
+        console.print(f"\n[yellow]Note:[/yellow] Direct MySQL connection not yet implemented.")
+        console.print(f"  Use 'wowsql db query' to execute SQL queries.")
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise click.Abort()
+
+
+@db_group.command('explain')
+@click.argument('sql')
+@click.option('--project', help='Project slug (overrides default)')
+@click.option('--format', type=click.Choice(['table', 'json', 'yaml']))
+@click.pass_context
+def explain_query(ctx, sql, project, format):
+    """Explain query execution plan."""
+    try:
+        api = ctx.obj['api']
+        config = ctx.obj['config']
+        project_slug = project or config.get_default_project()
+        
+        if not project_slug:
+            console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
+            raise click.Abort()
+        
+        explain_result = api.explain_query(project_slug, sql)
+        output_format = format or ctx.obj['output']
+        format_output(explain_result, output_format, console)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise click.Abort()
+
+
+@db_group.command('analyze')
+@click.argument('table')
+@click.option('--project', help='Project slug (overrides default)')
+@click.pass_context
+def analyze_table(ctx, table, project):
+    """Analyze table and update statistics."""
+    try:
+        api = ctx.obj['api']
+        config = ctx.obj['config']
+        project_slug = project or config.get_default_project()
+        
+        if not project_slug:
+            console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
+            raise click.Abort()
+        
+        api.analyze_table(project_slug, table)
+        console.print(f"[green]✓[/green] Table '{table}' analyzed")
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise click.Abort()
+
+
+@db_group.command('optimize')
+@click.argument('table')
+@click.option('--project', help='Project slug (overrides default)')
+@click.pass_context
+def optimize_table(ctx, table, project):
+    """Optimize table."""
+    try:
+        api = ctx.obj['api']
+        config = ctx.obj['config']
+        project_slug = project or config.get_default_project()
+        
+        if not project_slug:
+            console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
+            raise click.Abort()
+        
+        api.optimize_table(project_slug, table)
+        console.print(f"[green]✓[/green] Table '{table}' optimized")
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise click.Abort()
+

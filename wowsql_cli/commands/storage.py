@@ -158,10 +158,9 @@ def storage_quota(ctx, project, format):
             console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
             raise click.Abort()
         
-        # This would need a quota endpoint in the API
-        console.print("[yellow]Note:[/yellow] Storage quota endpoint not yet implemented")
-        # quota = api.get_storage_quota(project_slug)
-        # format_output(quota, format or ctx.obj['output'], console)
+        quota = api.get_storage_quota(project_slug)
+        output_format = format or ctx.obj['output']
+        format_output(quota, output_format, console)
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise click.Abort()

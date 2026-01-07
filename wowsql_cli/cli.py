@@ -10,7 +10,7 @@ from wowsql_cli.api import APIClient
 from wowsql_cli import __version__
 
 # Import command groups
-from wowsql_cli.commands import auth, projects, db, storage, migration, types, local, link, secrets
+from wowsql_cli.commands import auth, projects, db, storage, migration, types, local, link, secrets, init, logs, backup, config_cmd, validate, views, procedures, indexes, triggers
 
 console = Console()
 
@@ -47,6 +47,25 @@ cli.add_command(types.types_group, name='gen')
 cli.add_command(local.local_group, name='local')
 cli.add_command(link.link_group, name='link')
 cli.add_command(secrets.secrets_group, name='secrets')
+cli.add_command(init.init, name='init')
+cli.add_command(logs.logs_group, name='logs')
+cli.add_command(backup.backup_group, name='backup')
+cli.add_command(config_cmd.config_group, name='config')
+cli.add_command(validate.validate, name='validate')
+cli.add_command(views.views_group, name='views')
+cli.add_command(procedures.procedures_group, name='procedures')
+cli.add_command(indexes.indexes_group, name='indexes')
+cli.add_command(triggers.triggers_group, name='triggers')
+
+# Add status as top-level command (also available under logs)
+@cli.command()
+@click.option('--project', help='Project slug (overrides default)')
+@click.option('--format', type=click.Choice(['table', 'json', 'yaml']))
+@click.pass_context
+def status(ctx, project, format):
+    """Show project status and health."""
+    from wowsql_cli.commands.logs import status as status_cmd
+    status_cmd(ctx, project, format)
 
 # Add top-level aliases for common commands
 @cli.command()

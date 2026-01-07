@@ -1,25 +1,25 @@
-"""Secrets management commands."""
+"""Database triggers management commands."""
 
 import click
 from rich.console import Console
-
 from wowsql_cli.utils.formatters import format_output
 
 console = Console()
 
 
 @click.group()
-def secrets_group():
-    """Secrets management commands."""
+def triggers_group():
+    """Database triggers management commands."""
     pass
 
 
-@secrets_group.command('list')
+@triggers_group.command('list')
+@click.argument('table', required=False)
 @click.option('--project', help='Project slug (overrides default)')
 @click.option('--format', type=click.Choice(['table', 'json', 'yaml']))
 @click.pass_context
-def list_secrets(ctx, project, format):
-    """List all secrets."""
+def list_triggers(ctx, table, project, format):
+    """List triggers for a table or all tables."""
     try:
         api = ctx.obj['api']
         config = ctx.obj['config']
@@ -29,22 +29,25 @@ def list_secrets(ctx, project, format):
             console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
             raise click.Abort()
         
-        secrets = api.list_secrets(project_slug)
+        triggers = api.list_triggers(project_slug, table=table)
         output_format = format or ctx.obj['output']
-        format_output(secrets, output_format, console)
+        format_output(triggers, output_format, console)
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise click.Abort()
 
 
-@secrets_group.command('set')
-@click.argument('key')
-@click.argument('value')
-@click.option('--public', is_flag=True, help='Mark secret as public (can be exposed to client)')
+@triggers_group.command('create')
+@click.argument('trigger_name')
+@click.argument('table')
+@click.argument('timing', type=click.Choice(['BEFORE', 'AFTER']))
+@click.argument('event', type=click.Choice(['INSERT', 'UPDATE', 'DELETE']))
+@click.argument('sql', required=False)
+@click.option('--file', type=click.Path(exists=True), help='SQL file with trigger body')
 @click.option('--project', help='Project slug (overrides default)')
 @click.pass_context
-def set_secret(ctx, key, value, project, public):
-    """Set a secret value."""
+def create_trigger(ctx, trigger_name, table, timing, event, sql, file, project):
+    """Create a database trigger."""
     try:
         api = ctx.obj['api']
         config = ctx.obj['config']
@@ -54,19 +57,29 @@ def set_secret(ctx, key, value, project, public):
             console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
             raise click.Abort()
         
-        api.set_secret(project_slug, key, value, is_public=public)
-        console.print(f"[green]✓[/green] Secret '{key}' set")
+        if file:
+            with open(file, 'r') as f:
+                trigger_body = f.read()
+        elif sql:
+            trigger_body = sql
+        else:
+            console.print("[red]Error:[/red] SQL body or --file required")
+            raise click.Abort()
+        
+        api.create_trigger(project_slug, trigger_name, table, timing, event, trigger_body)
+        console.print(f"[green]✓[/green] Trigger '{trigger_name}' created on '{table}'")
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise click.Abort()
 
 
-@secrets_group.command('get')
-@click.argument('key')
+@triggers_group.command('delete')
+@click.argument('trigger_name')
 @click.option('--project', help='Project slug (overrides default)')
+@click.option('--confirm', is_flag=True, help='Skip confirmation')
 @click.pass_context
-def get_secret(ctx, key, project):
-    """Get a secret value."""
+def delete_trigger(ctx, trigger_name, project, confirm):
+    """Delete a trigger."""
     try:
         api = ctx.obj['api']
         config = ctx.obj['config']
@@ -76,30 +89,13 @@ def get_secret(ctx, key, project):
             console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
             raise click.Abort()
         
-        value = api.get_secret(project_slug, key)
-        console.print(value)
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise click.Abort()
-
-
-@secrets_group.command('unset')
-@click.argument('key')
-@click.option('--project', help='Project slug (overrides default)')
-@click.pass_context
-def unset_secret(ctx, key, project):
-    """Delete a secret."""
-    try:
-        api = ctx.obj['api']
-        config = ctx.obj['config']
-        project_slug = project or config.get_default_project()
+        if not confirm:
+            if not click.confirm(f"Delete trigger '{trigger_name}'?"):
+                console.print("[yellow]Cancelled[/yellow]")
+                return
         
-        if not project_slug:
-            console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
-            raise click.Abort()
-        
-        api.delete_secret(project_slug, key)
-        console.print(f"[green]✓[/green] Secret '{key}' deleted")
+        api.delete_trigger(project_slug, trigger_name)
+        console.print(f"[green]✓[/green] Trigger '{trigger_name}' deleted")
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise click.Abort()
