@@ -30,7 +30,7 @@ wowsql projects list
 
 3. **Set default project:**
 ```bash
-wowsql projects set-default saravana-d92fd8e6
+wowsql projects set-default sample-d92fd8e6
 ```
 
 4. **Query database:**
