@@ -65,7 +65,7 @@ cli.add_command(triggers.triggers_group, name='triggers')
 def status(ctx, project, format):
     """Show project status and health."""
     from wowsql_cli.commands.logs import status as status_cmd
-    status_cmd(ctx, project, format)
+    ctx.invoke(status_cmd, project=project, format=format)
 
 # Add top-level aliases for common commands
 @cli.command()
