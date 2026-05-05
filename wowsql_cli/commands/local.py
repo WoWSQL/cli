@@ -49,9 +49,13 @@ def start_local(ctx):
         if result.returncode == 0:
             console.print("[green]✓[/green] Local environment started")
             console.print("\nServices:")
-            console.print("  • MySQL: localhost:3306")
-            console.print("  • Redis: localhost:6379")
-            console.print("  • MinIO: localhost:9000")
+            console.print("  • PostgreSQL:  localhost:5432  (user: postgres / password: postgres / db: wowsql_local)")
+            console.print("  • pgAdmin:     http://localhost:5050  (admin@wowsql.local / admin)")
+            console.print("  • Redis:       localhost:6379")
+            console.print("  • MinIO:       http://localhost:9001  (minioadmin / minioadmin)")
+            console.print()
+            console.print("  Connect with psql:")
+            console.print("    psql -h localhost -p 5432 -U postgres -d wowsql_local")
         else:
             console.print("[red]Error:[/red] Failed to start services")
             raise click.Abort()
@@ -169,28 +173,41 @@ def local_logs(ctx, service):
 
 
 def _create_local_setup(local_dir: Path):
-    """Create local development setup files."""
+    """Create local development setup files (PostgreSQL stack)."""
     local_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Create docker-compose.yml
-    compose_content = """version: '3.8'
+
+    compose_content = """\
+version: '3.8'
 
 services:
-  mysql:
-    image: mysql:8.0
-    container_name: wowsql-mysql
+  postgres:
+    image: postgres:16-alpine
+    container_name: wowsql-postgres
     environment:
-      MYSQL_ROOT_PASSWORD: rootpassword
-      MYSQL_DATABASE: wowsql_local
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: wowsql_local
     ports:
-      - "3306:3306"
+      - "5432:5432"
     volumes:
-      - mysql_data:/var/lib/mysql
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: wowsql-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@wowsql.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
 
   redis:
     image: redis:7-alpine
@@ -222,21 +239,28 @@ services:
       retries: 3
 
 volumes:
-  mysql_data:
+  postgres_data:
   minio_data:
 """
-    
+
     with open(local_dir / 'docker-compose.yml', 'w') as f:
         f.write(compose_content)
-    
-    # Create init.sql
-    init_sql = """-- Local development database initialization
-CREATE DATABASE IF NOT EXISTS wowsql_local;
-USE wowsql_local;
+
+    init_sql = """\
+-- WowSQL local development database initialization
+-- PostgreSQL 16
+
+-- Enable useful extensions
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- Example: create a test table
+-- CREATE TABLE IF NOT EXISTS example (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT);
 """
-    
+
     with open(local_dir / 'init.sql', 'w') as f:
         f.write(init_sql)
-    
-    console.print("[green]✓[/green] Created local development setup")
+
+    console.print("[green]✓[/green] Created local development setup (PostgreSQL)")
+    console.print("  docker-compose.yml and init.sql created in:", str(local_dir))
 

@@ -126,42 +126,62 @@ class APIClient:
                            params={'where': where},
                            headers={'X-Project-Slug': project_slug})
     
-    # Storage methods
+    # Storage methods — wire to real storage API
+    # Real paths: /storage/projects/{slug}/buckets/{bucket}/files
+    # The CLI treats "storage" as a flat file system; we map to the default bucket.
+
+    DEFAULT_BUCKET = "default"
+
     def list_storage(self, project_slug: str, prefix: Optional[str] = None) -> List[Dict[str, Any]]:
-        """List storage files."""
+        """List storage files in the default bucket."""
         params = {}
         if prefix:
             params['prefix'] = prefix
-        return self._request('GET', '/api/v1/storage/',
-                           params=params,
-                           headers={'X-Project-Slug': project_slug})
-    
+        return self._request(
+            'GET',
+            f'/storage/projects/{project_slug}/buckets/{self.DEFAULT_BUCKET}/files',
+            params=params,
+        )
+
     def upload_file(self, project_slug: str, file_path: Path, remote_path: str) -> Dict[str, Any]:
-        """Upload file to storage."""
+        """Upload file to storage (default bucket)."""
+        import mimetypes
+        mime, _ = mimetypes.guess_type(str(file_path))
         with open(file_path, 'rb') as f:
-            files = {'file': f}
+            files = {'file': (file_path.name, f, mime or 'application/octet-stream')}
             data = {'path': remote_path}
-            return self._request('POST', '/api/v1/storage/upload',
-                               files=files, data=data,
-                               headers={'X-Project-Slug': project_slug})
-    
+            # multipart upload — do NOT set Content-Type header (requests sets it with boundary)
+            saved_ct = self.session.headers.pop('Content-Type', None)
+            try:
+                response = self.session.post(
+                    f"{self.base_url}/storage/projects/{project_slug}/buckets/{self.DEFAULT_BUCKET}/files",
+                    files=files,
+                    data=data,
+                )
+                response.raise_for_status()
+                return response.json()
+            finally:
+                if saved_ct:
+                    self.session.headers['Content-Type'] = saved_ct
+
     def download_file(self, project_slug: str, remote_path: str, local_path: Path):
         """Download file from storage."""
+        encoded = remote_path.lstrip('/')
         response = self.session.get(
-            f"{self.base_url}/api/v1/storage/download",
-            params={'path': remote_path},
-            headers={'X-Project-Slug': project_slug}
+            f"{self.base_url}/storage/projects/{project_slug}/files/{encoded}",
         )
         response.raise_for_status()
         local_path.parent.mkdir(parents=True, exist_ok=True)
         with open(local_path, 'wb') as f:
             f.write(response.content)
-    
+
     def delete_file(self, project_slug: str, remote_path: str) -> Dict[str, Any]:
         """Delete file from storage."""
-        return self._request('DELETE', '/api/v1/storage/',
-                           params={'path': remote_path},
-                           headers={'X-Project-Slug': project_slug})
+        encoded = remote_path.lstrip('/')
+        return self._request(
+            'DELETE',
+            f'/storage/projects/{project_slug}/files/{encoded}',
+        )
     
     # Schema methods
     def get_schema(self, project_slug: str) -> Dict[str, Any]:
@@ -186,10 +206,14 @@ class APIClient:
                            json={'name': migration_name, 'sql': sql},
                            headers={'X-Project-Slug': project_slug})
     
-    def rollback_migration(self, project_slug: str, migration_name: str) -> Dict[str, Any]:
-        """Rollback a migration."""
+    def rollback_migration(self, project_slug: str, migration_name: str,
+                          down_sql: Optional[str] = None) -> Dict[str, Any]:
+        """Rollback a migration, optionally executing its DOWN SQL."""
+        payload: Dict[str, Any] = {'name': migration_name}
+        if down_sql:
+            payload['down_sql'] = down_sql
         return self._request('POST', '/api/v1/migration/rollback',
-                           json={'name': migration_name},
+                           json=payload,
                            headers={'X-Project-Slug': project_slug})
     
     # Logs and monitoring methods
@@ -224,10 +248,35 @@ class APIClient:
                            headers={'X-Project-Slug': project_slug})
     
     def restore_database(self, project_slug: str, sql: str) -> Dict[str, Any]:
-        """Restore database from SQL."""
+        """Restore database from SQL (legacy JSON endpoint)."""
         return self._request('POST', '/api/v1/db/restore',
                            json={'sql': sql},
                            headers={'X-Project-Slug': project_slug})
+
+    def restore_from_file(self, project_slug: str, sql: str,
+                          skip_errors: bool = False) -> Dict[str, Any]:
+        """Upload a local .sql file's content and restore the remote database."""
+        return self._request('POST', '/api/v1/db/restore-file',
+                           json={'sql': sql, 'skip_errors': skip_errors},
+                           headers={'X-Project-Slug': project_slug})
+
+    def import_csv_table(self, project_slug: str, table: str, csv_content: str,
+                         delimiter: str = ',', has_header: bool = True,
+                         create_table: bool = False,
+                         on_conflict: str = 'error') -> Dict[str, Any]:
+        """Send local CSV content to the server for import into a table."""
+        return self._request(
+            'POST', '/api/v1/db/import-csv',
+            json={
+                'table': table,
+                'csv_content': csv_content,
+                'delimiter': delimiter,
+                'has_header': has_header,
+                'create_table': create_table,
+                'on_conflict': on_conflict,
+            },
+            headers={'X-Project-Slug': project_slug},
+        )
     
     def compare_schemas(self, project_slug: str, local_schema: Dict[str, Any],
                        remote_schema: Dict[str, Any]) -> Dict[str, Any]:

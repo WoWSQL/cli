@@ -216,8 +216,8 @@ def export_data(ctx, table, output, format, project):
             console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
             raise click.Abort()
         
-        # Query all data
-        result = api.query(project_slug, f"SELECT * FROM `{table}`")
+        # Query all data (PostgreSQL double-quote identifiers)
+        result = api.query(project_slug, f'SELECT * FROM "{table}"')
         data = result.get('data', [])
         
         # Write to file
@@ -405,40 +405,75 @@ def seed_database(ctx, file, project):
 
 @db_group.command('diff')
 @click.option('--project', help='Project slug (overrides default)')
-@click.option('--format', type=click.Choice(['table', 'json', 'yaml']))
+@click.option('--format', 'fmt', type=click.Choice(['table', 'json', 'yaml']), default='table')
 @click.pass_context
-def diff_schema(ctx, project, format):
-    """Compare local and remote database schemas."""
-    try:
-        api = ctx.obj['api']
-        config = ctx.obj['config']
-        project_slug = project or config.get_default_project()
-        
-        if not project_slug:
-            console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
-            raise click.Abort()
-        
-        # Get remote schema
-        remote_schema = api.get_schema(project_slug)
-        
-        # Get local schema from migrations
-        migrations_dir = Path('migrations')
-        local_schema = {}
-        if migrations_dir.exists():
-            # In a real implementation, we'd parse migrations to build schema
-            console.print("[yellow]Local schema parsing from migrations not yet fully implemented[/yellow]")
-        
-        # Compare schemas
-        diff_result = api.compare_schemas(project_slug, local_schema, remote_schema)
-        
-        output_format = format or ctx.obj['output']
-        if output_format == 'table':
-            _display_schema_diff(diff_result)
-        else:
-            format_output(diff_result, output_format, console)
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
+def diff_schema(ctx, project, fmt):
+    """
+    Compare local migration schema against the remote database schema.
+
+    Parses CREATE TABLE statements from all unapplied migrations in
+    the local migrations/ directory and compares them against the
+    live remote schema.
+    """
+    import re
+
+    api    = ctx.obj['api']
+    config = ctx.obj['config']
+    project_slug = project or config.get_default_project()
+
+    if not project_slug:
+        console.print("[red]Error:[/red] No project specified. Use --project or set a default.")
         raise click.Abort()
+
+    # ── Get remote schema ────────────────────────────────────────────
+    remote_schema = api.get_schema(project_slug)
+    remote_tables = {t['name']: t for t in remote_schema.get('tables', [])}
+
+    # ── Parse local migrations ───────────────────────────────────────
+    migrations_dir = Path('migrations')
+    local_tables: dict = {}
+
+    if migrations_dir.exists():
+        history = api.get_migration_history(project_slug)
+        applied_names = {m['migration_name'] for m in history if not m.get('rolled_back_at')}
+
+        for sql_file in sorted(migrations_dir.glob('*.sql')):
+            if sql_file.stem in applied_names:
+                continue
+            sql = sql_file.read_text(encoding='utf-8')
+            # Extract CREATE TABLE names from the UP file
+            for match in re.finditer(
+                r'CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+"?(\w+)"?',
+                sql, re.IGNORECASE
+            ):
+                tname = match.group(1)
+                local_tables[tname] = {'file': sql_file.name}
+    else:
+        console.print("[yellow]No migrations/ directory found. Showing remote schema only.[/yellow]")
+
+    # ── Build diff ───────────────────────────────────────────────────
+    differences = []
+
+    for tname in local_tables:
+        if tname not in remote_tables:
+            differences.append({'type': 'TABLE', 'name': tname, 'status': 'PENDING', 'details': f"In {local_tables[tname]['file']} but not yet in remote"})
+
+    for tname in remote_tables:
+        if tname not in local_tables and tname not in {
+            # ignore system tables
+            'schema_migrations', 'migration_history', 'spatial_ref_sys'
+        }:
+            differences.append({'type': 'TABLE', 'name': tname, 'status': 'REMOTE_ONLY', 'details': 'Exists in remote but not in local migrations'})
+
+    if fmt != 'table':
+        format_output({'differences': differences, 'local_tables': list(local_tables.keys()), 'remote_tables': list(remote_tables.keys())}, fmt, console)
+        return
+
+    if not differences:
+        console.print("[green]✓[/green] No schema differences — local migrations match remote.")
+        return
+
+    _display_schema_diff({'differences': differences})
 
 
 def _display_schema_diff(diff_result: dict):
@@ -503,11 +538,11 @@ def dump_schema(ctx, output, project):
 
 @schema_group.command('diff')
 @click.option('--project', help='Project slug (overrides default)')
-@click.option('--format', type=click.Choice(['table', 'json', 'yaml']))
+@click.option('--format', 'fmt', type=click.Choice(['table', 'json', 'yaml']), default='table')
 @click.pass_context
-def schema_diff(ctx, project, format):
-    """Show schema differences."""
-    ctx.forward(diff_schema)
+def schema_diff(ctx, project, fmt):
+    """Show schema differences (alias for db diff)."""
+    ctx.invoke(diff_schema, project=project, fmt=fmt)
 
 
 @db_group.command('connect')
@@ -532,8 +567,12 @@ def connect_database(ctx, project):
         console.print(f"  Port: {connection_info.get('port')}")
         console.print(f"  Database: {connection_info.get('database')}")
         console.print(f"  User: {connection_info.get('user')}")
-        console.print(f"\n[yellow]Note:[/yellow] Direct MySQL connection not yet implemented.")
-        console.print(f"  Use 'wowsql db query' to execute SQL queries.")
+        console.print()
+        console.print(f"  [bold]Connect with psql:[/bold]")
+        console.print(f"    psql -h {connection_info.get('host')} -p {connection_info.get('port')} "
+                      f"-U {connection_info.get('user')} -d {connection_info.get('database')}")
+        console.print()
+        console.print(f"  [dim]Or use 'wowsql db query' to run SQL via the CLI.[/dim]")
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise click.Abort()
@@ -604,5 +643,97 @@ def optimize_table(ctx, table, project):
         console.print(f"[green]✓[/green] Table '{table}' optimized")
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
+        raise click.Abort()
+
+
+# ─── CSV IMPORT ──────────────────────────────────────────────────────────────
+
+@db_group.command('import-csv')
+@click.argument('file', type=click.Path(exists=True, dir_okay=False))
+@click.option('--table', '-t', required=True, help='Target table name')
+@click.option('--delimiter', '-d', default=',', show_default=True, help='CSV delimiter character')
+@click.option('--no-header', is_flag=True, help='CSV file has no header row (columns named col_1, col_2, ...)')
+@click.option('--create-table', is_flag=True, help='Auto-create the table from CSV column headers (all TEXT columns)')
+@click.option('--on-conflict', type=click.Choice(['error', 'ignore', 'replace']), default='error',
+              show_default=True,
+              help='What to do when a row violates a constraint:\n'
+                   '  error   – abort on first conflict (default)\n'
+                   '  ignore  – skip conflicting rows silently\n'
+                   '  replace – upsert (requires a primary key)')
+@click.option('--project', help='Project slug (overrides default)')
+@click.option('--format', 'fmt', type=click.Choice(['table', 'json', 'yaml']), default='table')
+@click.pass_context
+def import_csv(ctx, file, table, delimiter, no_header, create_table, on_conflict, project, fmt):
+    """
+    Import data from a local CSV file into a database table.
+
+    Reads the CSV from your device and inserts each row into the specified table.
+    The table must already exist unless --create-table is passed.
+
+    \b
+    Examples:
+      # Import into an existing table
+      wowsql db import-csv ./users.csv --table users
+
+      # Create the table automatically from headers (all TEXT columns)
+      wowsql db import-csv ./products.csv --table products --create-table
+
+      # Tab-separated file, skip duplicate rows
+      wowsql db import-csv ./orders.tsv --table orders -d $'\\t' --on-conflict ignore
+
+      # Upsert (update existing rows by primary key)
+      wowsql db import-csv ./inventory.csv --table inventory --on-conflict replace
+    """
+    from rich.progress import Progress, SpinnerColumn, TextColumn
+
+    api    = ctx.obj['api']
+    config = ctx.obj['config']
+    project_slug = project or config.get_default_project()
+
+    if not project_slug:
+        console.print("[red]Error:[/red] No project specified. Use --project or set a default.")
+        raise click.Abort()
+
+    csv_path = Path(file)
+    file_size_kb = csv_path.stat().st_size / 1024
+
+    console.print(f"[cyan]Importing[/cyan] {csv_path.name} → [bold]{table}[/bold]  ({file_size_kb:.1f} KB)")
+
+    csv_content = csv_path.read_text(encoding='utf-8')
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[cyan]{task.description}"),
+        transient=True,
+    ) as progress:
+        progress.add_task(f"Sending to server...", total=None)
+        result = api.import_csv_table(
+            project_slug,
+            table=table,
+            csv_content=csv_content,
+            delimiter=delimiter,
+            has_header=not no_header,
+            create_table=create_table,
+            on_conflict=on_conflict,
+        )
+
+    if result.get('success'):
+        console.print(f"[green]Import completed[/green]")
+        console.print(f"  [bold]Table:[/bold]         {result.get('table', table)}")
+        console.print(f"  [bold]Columns:[/bold]       {', '.join(result.get('columns', []))}")
+        console.print(f"  [bold]Rows inserted:[/bold] {result.get('rows_inserted', 0)}")
+        skipped = result.get('rows_skipped', 0)
+        if skipped:
+            console.print(f"  [yellow]Rows skipped:[/yellow]  {skipped}")
+        errs = result.get('errors', [])
+        if errs:
+            console.print(f"  [yellow]Errors (first {min(5,len(errs))}):[/yellow]")
+            for err in errs[:5]:
+                row_preview = str(err.get('row', ''))[:80]
+                console.print(f"    [dim]- {err.get('error','')} | row: {row_preview}[/dim]")
+    else:
+        console.print(f"[red]Import failed.[/red]")
+        for err in result.get('errors', []):
+            console.print(f"  [red]•[/red] {err}")
         raise click.Abort()
 

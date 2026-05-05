@@ -63,8 +63,8 @@ def generate_typescript(ctx, output, project, local):
                     col_type = col.get('type', '')
                     nullable = col.get('nullable', False)
                     
-                    # Map MySQL types to TypeScript types
-                    ts_type = _mysql_to_typescript(col_type)
+                    # Map PostgreSQL types to TypeScript types
+                    ts_type = _pg_to_typescript(col_type)
                     if nullable:
                         ts_type += " | null"
                     
@@ -79,21 +79,40 @@ def generate_typescript(ctx, output, project, local):
         raise click.Abort()
 
 
-def _mysql_to_typescript(mysql_type: str) -> str:
-    """Convert MySQL type to TypeScript type."""
-    mysql_type = mysql_type.upper()
-    
-    if 'INT' in mysql_type or 'BIGINT' in mysql_type or 'SMALLINT' in mysql_type or 'TINYINT' in mysql_type:
+def _pg_to_typescript(pg_type: str) -> str:
+    """Convert PostgreSQL type to TypeScript type."""
+    t = pg_type.lower().strip()
+
+    # Integer types
+    if t in ('integer', 'int', 'int4', 'int2', 'smallint', 'bigint', 'int8',
+             'serial', 'bigserial', 'smallserial'):
         return 'number'
-    elif 'DECIMAL' in mysql_type or 'FLOAT' in mysql_type or 'DOUBLE' in mysql_type:
+    # Floating point / numeric
+    if t in ('real', 'float4', 'float8', 'double precision', 'numeric', 'decimal'):
         return 'number'
-    elif 'BOOL' in mysql_type or 'BOOLEAN' in mysql_type:
+    if t.startswith('numeric') or t.startswith('decimal'):
+        return 'number'
+    # Boolean
+    if t == 'boolean' or t == 'bool':
         return 'boolean'
-    elif 'DATE' in mysql_type or 'TIME' in mysql_type or 'DATETIME' in mysql_type or 'TIMESTAMP' in mysql_type:
+    # Date / time
+    if t in ('date', 'time', 'timetz', 'timestamp', 'timestamptz',
+             'time without time zone', 'time with time zone',
+             'timestamp without time zone', 'timestamp with time zone',
+             'interval'):
         return 'Date'
-    elif 'JSON' in mysql_type:
+    # JSON
+    if t in ('json', 'jsonb'):
         return 'any'
-    else:
-        # Default to string for VARCHAR, TEXT, CHAR, etc.
+    # UUID
+    if t == 'uuid':
         return 'string'
+    # Array types
+    if t.endswith('[]') or t.startswith('array'):
+        return 'any[]'
+    # Binary
+    if t == 'bytea':
+        return 'Buffer'
+    # Default: string covers text, varchar, char, name, citext, etc.
+    return 'string'
 

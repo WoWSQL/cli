@@ -9,7 +9,7 @@ def get_version():
     """Get version from wowsql_cli/__init__.py."""
     init_file = Path(__file__).parent / "wowsql_cli" / "__init__.py"
     if init_file.exists():
-        with open(init_file, "r") as f:
+        with open(init_file, "r", encoding="utf-8") as f:
             for line in f:
                 if line.startswith("__version__"):
                     return line.split("=")[1].strip().strip('"').strip("'")
@@ -17,7 +17,7 @@ def get_version():
 
 # Read README
 readme_file = Path(__file__).parent / "README.md"
-long_description = readme_file.read_text() if readme_file.exists() else ""
+long_description = readme_file.read_text(encoding="utf-8") if readme_file.exists() else ""
 
 setup(
     name="wowsql-cli",
@@ -64,6 +64,6 @@ setup(
         "Topic :: System :: Systems Administration",
     ],
     python_requires=">=3.8",
-    keywords="wowsql cli database mysql backend api",
+    keywords="wowsql cli database Postgres backend api",
 )
 
