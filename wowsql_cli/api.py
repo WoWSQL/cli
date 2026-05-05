@@ -186,12 +186,12 @@ class APIClient:
     # Schema methods
     def get_schema(self, project_slug: str) -> Dict[str, Any]:
         """Get database schema."""
-        return self._request('GET', '/api/v2/schema/tables',
+        return self._request('GET', '/api/v2/tables',
                            headers={'X-Project-Slug': project_slug})
     
     def get_table_schema(self, project_slug: str, table_name: str) -> Dict[str, Any]:
         """Get table schema details."""
-        return self._request('GET', f'/api/v2/schema/tables/{table_name}',
+        return self._request('GET', f'/api/v2/tables/{table_name}/schema',
                            headers={'X-Project-Slug': project_slug})
     
     # Migration methods

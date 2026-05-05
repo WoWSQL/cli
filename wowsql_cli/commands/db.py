@@ -607,7 +607,8 @@ def explain_query(ctx, sql, project, format):
 @click.option('--project', help='Project slug (overrides default)')
 @click.pass_context
 def analyze_table(ctx, table, project):
-    """Analyze table and update statistics."""
+    """Analyze table and show planner statistics."""
+    from rich.table import Table as RichTable
     try:
         api = ctx.obj['api']
         config = ctx.obj['config']
@@ -617,8 +618,72 @@ def analyze_table(ctx, table, project):
             console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
             raise click.Abort()
         
-        api.analyze_table(project_slug, table)
-        console.print(f"[green]✓[/green] Table '{table}' analyzed")
+        result = api.analyze_table(project_slug, table)
+        console.print(f"[green]✓[/green] Table '[bold]{table}[/bold]' analyzed — planner statistics updated\n")
+
+        stats = result.get('stats', {})
+        if stats:
+            # ── Table overview ───────────────────────────────────────────────
+            overview = RichTable(title="Table Statistics", show_header=True, header_style="bold cyan")
+            overview.add_column("Metric", style="dim", min_width=28)
+            overview.add_column("Value", min_width=20)
+
+            def _fmt(v):
+                if v is None:
+                    return "[dim]never[/dim]"
+                return str(v)
+
+            overview.add_row("Row count (live)",       _fmt(stats.get("row_count")))
+            overview.add_row("Dead tuples",            _fmt(stats.get("dead_tuples")))
+            overview.add_row("Modified since analyze", _fmt(stats.get("modified_since_analyze")))
+            overview.add_row("Sequential scans",       _fmt(stats.get("seq_scans")))
+            overview.add_row("Index scans",            _fmt(stats.get("index_scans")))
+            overview.add_row("Table size",             _fmt(stats.get("table_size")))
+            overview.add_row("Indexes size",           _fmt(stats.get("indexes_size")))
+            overview.add_row("Total size",             _fmt(stats.get("total_size")))
+            overview.add_row("Last analyze",           _fmt(stats.get("last_analyze")))
+            overview.add_row("Last autoanalyze",       _fmt(stats.get("last_autoanalyze")))
+            overview.add_row("Last vacuum",            _fmt(stats.get("last_vacuum")))
+            overview.add_row("Last autovacuum",        _fmt(stats.get("last_autovacuum")))
+            console.print(overview)
+
+        indexes = result.get('indexes', [])
+        if indexes:
+            console.print()
+            idx_table = RichTable(title="Indexes", show_header=True, header_style="bold cyan")
+            idx_table.add_column("Index",    min_width=30)
+            idx_table.add_column("Columns",  min_width=20)
+            idx_table.add_column("Primary",  min_width=8)
+            idx_table.add_column("Unique",   min_width=8)
+            idx_table.add_column("Scans",    min_width=8)
+            idx_table.add_column("Size",     min_width=10)
+            for idx in indexes:
+                idx_table.add_row(
+                    idx.get("index_name", ""),
+                    idx.get("columns", ""),
+                    "✓" if idx.get("is_primary") else "",
+                    "✓" if idx.get("is_unique") else "",
+                    str(idx.get("scans") or 0),
+                    idx.get("index_size", ""),
+                )
+            console.print(idx_table)
+
+        # ── Health hints ─────────────────────────────────────────────────────
+        if stats:
+            hints = []
+            dead = stats.get("dead_tuples") or 0
+            live = stats.get("row_count") or 0
+            if live > 0 and dead / max(live, 1) > 0.1:
+                hints.append(f"[yellow]⚠[/yellow]  Dead tuple ratio is high ({dead}/{live}). Consider running [bold]wowsql db optimize {table}[/bold] (VACUUM ANALYZE).")
+            if not stats.get("last_analyze") and not stats.get("last_autoanalyze"):
+                hints.append("[yellow]⚠[/yellow]  Table has never been analyzed before.")
+            if stats.get("seq_scans", 0) > 1000 and not indexes:
+                hints.append("[yellow]⚠[/yellow]  High sequential scan count with no indexes. Consider adding an index.")
+            if hints:
+                console.print()
+                for h in hints:
+                    console.print(h)
+
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise click.Abort()
@@ -627,20 +692,143 @@ def analyze_table(ctx, table, project):
 @db_group.command('optimize')
 @click.argument('table')
 @click.option('--project', help='Project slug (overrides default)')
+@click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
 @click.pass_context
-def optimize_table(ctx, table, project):
-    """Optimize table."""
+def optimize_table(ctx, table, project, yes):
+    """VACUUM ANALYZE a table — reclaim dead tuples and refresh planner stats."""
+    from rich.table import Table as RichTable
     try:
-        api = ctx.obj['api']
+        api    = ctx.obj['api']
         config = ctx.obj['config']
         project_slug = project or config.get_default_project()
-        
+
         if not project_slug:
             console.print("[red]Error:[/red] No project specified. Use --project or set default project.")
             raise click.Abort()
-        
-        api.optimize_table(project_slug, table)
-        console.print(f"[green]✓[/green] Table '{table}' optimized")
+
+        # ── Fetch current stats so the user can make an informed decision ────
+        console.print(f"[dim]Fetching current stats for '[bold]{table}[/bold]'…[/dim]")
+        try:
+            preview = api.analyze_table(project_slug, table)
+            stats   = preview.get('stats', {})
+        except Exception:
+            stats = {}
+
+        if stats:
+            live      = stats.get('row_count') or 0
+            dead      = stats.get('dead_tuples') or 0
+            mod       = stats.get('modified_since_analyze') or 0
+            total_sz  = stats.get('total_size', 'unknown')
+            dead_pct  = round(dead / max(live, 1) * 100, 1)
+
+            preview_tbl = RichTable(title=f"Current state of '{table}'", show_header=True, header_style="bold cyan")
+            preview_tbl.add_column("Metric",  style="dim", min_width=26)
+            preview_tbl.add_column("Value",   min_width=16)
+            preview_tbl.add_row("Live rows",                str(live))
+            preview_tbl.add_row("Dead tuples",              f"{dead}  ({dead_pct}%)")
+            preview_tbl.add_row("Modified since analyze",   str(mod))
+            preview_tbl.add_row("Total size",               total_sz)
+            console.print(preview_tbl)
+            console.print()
+
+            # ── What VACUUM ANALYZE will do ───────────────────────────────────
+            console.print("[bold]VACUUM ANALYZE[/bold] will:")
+            console.print(f"  • Reclaim space from [yellow]{dead}[/yellow] dead tuple(s) (~{dead_pct}% bloat)")
+            console.print(f"  • Refresh planner statistics for [yellow]{live}[/yellow] live row(s)")
+            if mod > 0:
+                console.print(f"  • Update stats for [yellow]{mod}[/yellow] row(s) modified since last analyze")
+            console.print()
+
+        # ── Confirmation ─────────────────────────────────────────────────────
+        if not yes:
+            confirmed = click.confirm(
+                f"Run VACUUM ANALYZE on '{table}'?", default=True
+            )
+            if not confirmed:
+                console.print("[dim]Aborted.[/dim]")
+                return
+
+        console.print(f"[dim]Running VACUUM ANALYZE on '[bold]{table}[/bold]'…[/dim]")
+        result = api.optimize_table(project_slug, table)
+
+        console.print(f"\n[green]✓[/green] VACUUM ANALYZE complete on '[bold]{table}[/bold]'\n")
+
+        before = result.get('before', {})
+        after  = result.get('after',  {})
+
+        if before and after:
+            # ── Before / After comparison table ──────────────────────────────
+            cmp = RichTable(title="Before → After", show_header=True, header_style="bold cyan")
+            cmp.add_column("Metric",      style="dim",   min_width=24)
+            cmp.add_column("Before",      style="red",   min_width=14)
+            cmp.add_column("After",       style="green", min_width=14)
+            cmp.add_column("Change",      min_width=16)
+
+            def _delta(a, b, unit=""):
+                if a is None or b is None:
+                    return "[dim]—[/dim]"
+                diff = b - a
+                if diff == 0:
+                    return "[dim]no change[/dim]"
+                sign = "+" if diff > 0 else ""
+                color = "red" if diff > 0 else "green"
+                return f"[{color}]{sign}{diff}{unit}[/{color}]"
+
+            def _size_delta(before_bytes, after_bytes):
+                if before_bytes is None or after_bytes is None:
+                    return "[dim]—[/dim]"
+                diff = after_bytes - before_bytes
+                if diff == 0:
+                    return "[dim]no change[/dim]"
+                abs_diff = abs(diff)
+                if abs_diff >= 1024 * 1024:
+                    label = f"{abs_diff / 1024 / 1024:.1f} MB"
+                elif abs_diff >= 1024:
+                    label = f"{abs_diff / 1024:.1f} kB"
+                else:
+                    label = f"{abs_diff} B"
+                if diff < 0:
+                    return f"[green]−{label} reclaimed[/green]"
+                return f"[red]+{label} grown[/red]"
+
+            cmp.add_row("Live rows",
+                str(before.get('row_count', '?')),
+                str(after.get('row_count', '?')),
+                _delta(before.get('row_count'), after.get('row_count')))
+            cmp.add_row("Dead tuples",
+                str(before.get('dead_tuples', '?')),
+                str(after.get('dead_tuples', '?')),
+                _delta(before.get('dead_tuples'), after.get('dead_tuples')))
+            cmp.add_row("Modified since analyze",
+                str(before.get('modified_since_analyze', '?')),
+                str(after.get('modified_since_analyze', '?')),
+                _delta(before.get('modified_since_analyze'), after.get('modified_since_analyze')))
+            cmp.add_row("Total size",
+                before.get('total_size', '?'),
+                after.get('total_size', '?'),
+                _size_delta(before.get('total_bytes'), after.get('total_bytes')))
+            cmp.add_row("Table size",
+                before.get('table_size', '?'),
+                after.get('table_size', '?'),
+                "[dim]—[/dim]")
+            cmp.add_row("Indexes size",
+                before.get('indexes_size', '?'),
+                after.get('indexes_size', '?'),
+                "[dim]—[/dim]")
+            console.print(cmp)
+
+        reclaimed = result.get('reclaimed_bytes', 0)
+        if reclaimed > 0:
+            if reclaimed >= 1024 * 1024:
+                label = f"{reclaimed / 1024 / 1024:.1f} MB"
+            elif reclaimed >= 1024:
+                label = f"{reclaimed / 1024:.1f} kB"
+            else:
+                label = f"{reclaimed} bytes"
+            console.print(f"\n[green]✓[/green] Reclaimed [bold]{label}[/bold] of storage.")
+        elif after:
+            console.print("\n[dim]No storage was reclaimed — table was already clean.[/dim]")
+
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise click.Abort()
